@@ -1,7 +1,9 @@
 class ExpeditionTracker {
     constructor() {
-        this.projects = PROJECTS_DATA;
-        this.currentProject = this.projects[0];
+        // Load saved expedition preference first
+        this.currentExpedition = this.loadLastUsedExpedition();
+        this.expeditionData = {}; // Store data for both expeditions
+        this.currentProject = null;
         this.currentPhaseIndex = 0;
         this.selectedResource = null;
         this.selectedResourceType = null;
@@ -19,25 +21,149 @@ class ExpeditionTracker {
         this.progressData = this.loadProgress();
         
         this.init();
+    }
+
+    async init() {
+        // Load both expedition data
+        await this.loadExpeditionData();
+        
+        // Set initial project (first and only project in the array)
+        const expeditionProjects = this.expeditionData[this.currentExpedition];
+        if (expeditionProjects && expeditionProjects.length > 0) {
+            this.currentProject = expeditionProjects[0];
+        } else {
+            // Fallback to expedition 1 if current expedition has no data
+            console.warn(`No data for expedition ${this.currentExpedition}, falling back to expedition 1`);
+            this.currentExpedition = '1';
+            this.saveLastUsedExpedition();
+            this.currentProject = this.expeditionData['1'][0];
+        }
+        
+        this.setupEventListeners();
+        this.setupExpeditionToggle();
         this.setupKeyboardListeners();
         this.setupContextMenu();
         this.resetCommitCard();
-    }
-
-    init() {
+        
         this.renderProgressIndicators();
         this.renderProjectInfo();
         this.renderResourceList();
-        this.setupEventListeners();
         this.navigateToEarliestIncompletePhase();
     }
 
+    async loadExpeditionData() {
+        try {
+            // Load data for both expeditions
+            const [data1, data2] = await Promise.all([
+                fetch('expedition-1.json').then(r => r.json()),
+                fetch('expedition-2.json').then(r => r.json())
+            ]);
+            
+            this.expeditionData['1'] = data1;
+            this.expeditionData['2'] = data2;
+        } catch (error) {
+            console.error('Error loading expedition data:', error);
+            // Fallback to existing PROJECTS_DATA if available
+            if (typeof PROJECTS_DATA !== 'undefined') {
+                this.expeditionData['1'] = PROJECTS_DATA;
+                this.expeditionData['2'] = PROJECTS_DATA; // Use same data as fallback
+            } else {
+                // If no data is available, use empty structure
+                console.error('No expedition data available. Please ensure expedition-1.json and expedition-2.json exist.');
+                this.expeditionData['1'] = [];
+                this.expeditionData['2'] = [];
+            }
+        }
+    }
+
+    loadLastUsedExpedition() {
+        try {
+            const saved = localStorage.getItem('arcRaidersLastExpedition');
+            // Validate that the saved value is either '1' or '2'
+            if (saved === '1' || saved === '2') {
+                return saved;
+            }
+        } catch (error) {
+            console.error('Error loading last used expedition:', error);
+        }
+        // Default to expedition 1
+        return '1';
+    }
+
+    saveLastUsedExpedition() {
+        try {
+            localStorage.setItem('arcRaidersLastExpedition', this.currentExpedition);
+        } catch (error) {
+            console.error('Error saving last used expedition:', error);
+        }
+    }
+
+    setupExpeditionToggle() {
+        const buttons = document.querySelectorAll('.expedition-toggle-btn');
+        buttons.forEach(button => {
+            // Set initial active state based on current expedition
+            if (button.dataset.expedition === this.currentExpedition) {
+                button.classList.add('active');
+            } else {
+                button.classList.remove('active');
+            }
+            
+            button.addEventListener('click', (e) => {
+                const expedition = e.target.dataset.expedition;
+                this.switchExpedition(expedition);
+            });
+        });
+    }
+
+    switchExpedition(expeditionNumber) {
+        if (this.currentExpedition === expeditionNumber) return;
+        
+        // Save the new expedition preference
+        this.currentExpedition = expeditionNumber;
+        this.saveLastUsedExpedition();
+        
+        // Update UI
+        document.querySelectorAll('.expedition-toggle-btn').forEach(btn => {
+            btn.classList.remove('active');
+        });
+        document.querySelector(`[data-expedition="${expeditionNumber}"]`).classList.add('active');
+        
+        // Get the project for the new expedition
+        const expeditionProjects = this.expeditionData[expeditionNumber];
+        if (expeditionProjects && expeditionProjects.length > 0) {
+            this.currentProject = expeditionProjects[0];
+        } else {
+            console.error(`No data found for expedition ${expeditionNumber}`);
+            return;
+        }
+        
+        // Reset phase index
+        this.currentPhaseIndex = 0;
+        
+        // Clear any selections
+        this.resetCommitCard();
+        
+        // Re-render everything
+        this.renderProgressIndicators();
+        this.renderProjectInfo();
+        this.renderResourceList();
+        this.navigateToEarliestIncompletePhase();
+    }
+
+    // Update the progress key to include expedition
     loadProgress() {
         const saved = localStorage.getItem('arcRaidersProgress');
-        return saved ? JSON.parse(saved) : {
-            projects: {},
+        const base = saved ? JSON.parse(saved) : {
+            expeditions: {},
             lastUpdated: new Date().toISOString()
         };
+        
+        // Ensure expeditions structure exists
+        if (!base.expeditions) {
+            base.expeditions = {};
+        }
+        
+        return base;
     }
 
     saveProgress() {
@@ -46,41 +172,82 @@ class ExpeditionTracker {
     }
 
     getPhaseProgress() {
+        const expeditionKey = `expedition_${this.currentExpedition}`;
         const phase = this.currentProject.phases[this.currentPhaseIndex];
         const phaseKey = `phase_${phase.phase}`;
         
-        if (!this.progressData.projects[phaseKey]) {
-            this.progressData.projects[phaseKey] = { items: {}, categories: {} };
+        // Initialize expedition if it doesn't exist
+        if (!this.progressData.expeditions[expeditionKey]) {
+            this.progressData.expeditions[expeditionKey] = {};
         }
         
-        return this.progressData.projects[phaseKey];
+        // Initialize phase if it doesn't exist
+        if (!this.progressData.expeditions[expeditionKey][phaseKey]) {
+            this.progressData.expeditions[expeditionKey][phaseKey] = { items: {}, categories: {} };
+        }
+        
+        return this.progressData.expeditions[expeditionKey][phaseKey];
+    }
+
+    getPhaseProgressForPhase(phaseNumber) {
+        const expeditionKey = `expedition_${this.currentExpedition}`;
+        const phaseKey = `phase_${phaseNumber}`;
+        
+        if (this.progressData.expeditions[expeditionKey] && 
+            this.progressData.expeditions[expeditionKey][phaseKey]) {
+            return this.progressData.expeditions[expeditionKey][phaseKey];
+        }
+        return { items: {}, categories: {} };
     }
 
     navigateToEarliestIncompletePhase() {
-    // Check each phase in order (1-6)
-    for (let i = 0; i < this.currentProject.phases.length; i++) {
-        const phase = this.currentProject.phases[i];
-        
-        // If this phase is not completed
-        if (!this.isPhaseCompleted(phase.phase)) {
-            // Navigate to this phase
-            if (this.currentPhaseIndex !== i) {
-                this.currentPhaseIndex = i;
-                this.renderProgressIndicators();
-                this.renderProjectInfo();
-                this.renderResourceList();
-                this.resetCommitCard();
+        // Check each phase in order (1-6)
+        for (let i = 0; i < this.currentProject.phases.length; i++) {
+            const phase = this.currentProject.phases[i];
+            
+            // If this phase is not completed
+            if (!this.isPhaseCompleted(phase.phase)) {
+                // Navigate to this phase
+                if (this.currentPhaseIndex !== i) {
+                    this.currentPhaseIndex = i;
+                    this.renderProgressIndicators();
+                    this.renderProjectInfo();
+                    this.renderResourceList();
+                    this.resetCommitCard();
+                }
+                return; // Stop at first incomplete phase
             }
-            return; // Stop at first incomplete phase
         }
-    }
-    
+        
         // If all phases are completed, stay on the last phase
         this.currentPhaseIndex = this.currentProject.phases.length - 1;
         this.renderProgressIndicators();
         this.renderProjectInfo();
         this.renderResourceList();
         this.resetCommitCard();
+    }
+
+    isPhaseCompleted(phaseNumber) {
+        const phase = this.currentProject.phases.find(p => p.phase === phaseNumber);
+        if (!phase) return false;
+        
+        const progress = this.getPhaseProgressForPhase(phaseNumber);
+        
+        if (phase.requirementItemIds) {
+            for (const req of phase.requirementItemIds) {
+                const collected = progress.items[req.itemId] || 0;
+                if (collected < req.quantity) return false;
+            }
+        }
+        
+        if (phase.requirementCategories) {
+            for (const cat of phase.requirementCategories) {
+                const collected = progress.categories[cat.category] || 0;
+                if (collected < cat.valueRequired) return false;
+            }
+        }
+        
+        return true;
     }
 
     setupEventListeners() {
@@ -316,34 +483,6 @@ class ExpeditionTracker {
             };
             container.appendChild(item);
         });
-    }
-
-    isPhaseCompleted(phaseNumber) {
-        const phase = this.currentProject.phases.find(p => p.phase === phaseNumber);
-        if (!phase) return false;
-        
-        const progress = this.getPhaseProgressForPhase(phaseNumber);
-        
-        if (phase.requirementItemIds) {
-            for (const req of phase.requirementItemIds) {
-                const collected = progress.items[req.itemId] || 0;
-                if (collected < req.quantity) return false;
-            }
-        }
-        
-        if (phase.requirementCategories) {
-            for (const cat of phase.requirementCategories) {
-                const collected = progress.categories[cat.category] || 0;
-                if (collected < cat.valueRequired) return false;
-            }
-        }
-        
-        return true;
-    }
-
-    getPhaseProgressForPhase(phaseNumber) {
-        const phaseKey = `phase_${phaseNumber}`;
-        return this.progressData.projects[phaseKey] || { items: {}, categories: {} };
     }
 
     renderProjectInfo() {
@@ -675,7 +814,7 @@ function updateCountdownTimer() {
     window.countdownInterval = timerInterval;
 }
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
     window.tracker = new ExpeditionTracker();
     updateCountdownTimer();
 });
